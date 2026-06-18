@@ -439,6 +439,7 @@ async def scan_repo_task(task_id: str, db_session_factory, user_config: dict = N
             # 获取分析配置（优先使用用户配置）
             analysis_config = get_analysis_config(user_config)
             max_analyze_files = analysis_config['max_analyze_files']
+            llm_concurrency = analysis_config['llm_concurrency']
             llm_gap_ms = analysis_config['llm_gap_ms']
 
             # 限制文件数量
@@ -454,112 +455,152 @@ async def scan_repo_task(task_id: str, db_session_factory, user_config: dict = N
             await db.commit()
 
             print(f"📊 获取到 {len(files)} 个文件，开始分析 (最大文件数: {max_analyze_files}, 请求间隔: {llm_gap_ms}ms)")
-
-            # 4. 分析文件
+            # 4. 并发分析文件（仅 LLM 阶段，不写 DB）
             total_issues = 0
             total_lines = 0
             quality_scores = []
             scanned_files = 0
             failed_files = 0
-            skipped_files = 0  # 跳过的文件（空文件、太大等）
-            consecutive_failures = 0
+            skipped_files = 0
             MAX_CONSECUTIVE_FAILURES = 5
+            BATCH_SIZE = 50  # 每 50 个文件批量 commit 一次
 
-            for file_info in files:
-                # 检查是否取消
-                if task_control.is_cancelled(task_id):
-                    print(f"🛑 任务 {task_id} 已被用户取消")
-                    task.status = "cancelled"
-                    task.completed_at = datetime.now(timezone.utc)
-                    await db.commit()
-                    task_control.cleanup_task(task_id)
-                    return
+            semaphore = asyncio.Semaphore(llm_concurrency)
+            progress_lock = asyncio.Lock()
+            consecutive_failures = 0
 
-                # 检查连续失败次数
-                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    print(f"❌ 任务 {task_id}: 连续失败 {consecutive_failures} 次，停止分析")
-                    raise Exception(f"连续失败 {consecutive_failures} 次，可能是 LLM API 服务异常")
-
-                try:
-                    # 获取文件内容
-
-                    if is_ssh_url:
-                        # SSH方式已经包含了文件内容
-                        content = file_info.get('content', '')
-                        print(f"📥 正在处理SSH文件: {file_info['path']}")
-                    else:
-                        headers = {}
-                        # 使用提取的 token 或用户配置的 token
-                        
-                        if repo_type == "gitlab":
-                            token_to_use = file_info.get('token') or gitlab_token
-                            if token_to_use:
-                                headers["PRIVATE-TOKEN"] = token_to_use
-                        elif repo_type == "gitea":
-                            token_to_use = file_info.get('token') or gitea_token
-                            if token_to_use:
-                                headers["Authorization"] = f"token {token_to_use}"
-                        elif repo_type == "github":
-                            # GitHub raw URL 也是直接下载，通常public不需要token，private需要
-                            # GitHub raw user content url: raw.githubusercontent.com
-                            if github_token:
-                                headers["Authorization"] = f"Bearer {github_token}"
-                        
-                        print(f"📥 正在获取文件: {file_info['path']}")
-                        content = await fetch_file_content(file_info["url"], headers)
-
-                    if not content or not content.strip():
-                        print(f"⚠️ 文件内容为空，跳过: {file_info['path']}")
-                        skipped_files += 1
-                        continue
-                    
-                    if len(content) > settings.MAX_FILE_SIZE_BYTES:
-                        print(f"⚠️ 文件太大，跳过: {file_info['path']}")
-                        skipped_files += 1
-                        continue
-                    
-                    file_lines = content.split('\n')
-                    total_lines = len(file_lines) + 1
-                    language = get_language_from_path(file_info["path"])
-                    
-                    print(f"🤖 正在调用 LLM 分析: {file_info['path']} ({language}, {len(content)} bytes)")
-                    # LLM分析 - 支持规则集和提示词模板
-                    scan_config = (user_config or {}).get('scan_config', {})
-                    rule_set_id = scan_config.get('rule_set_id')
-                    prompt_template_id = scan_config.get('prompt_template_id')
-                    
-                    if rule_set_id or prompt_template_id:
-                        analysis = await llm_service.analyze_code_with_rules(
-                            content, language,
-                            rule_set_id=rule_set_id,
-                            prompt_template_id=prompt_template_id,
-                            db_session=db
-                        )
-                    else:
-                        analysis = await llm_service.analyze_code(content, language)
-                    print(f"✅ LLM 分析完成: {file_info['path']}")
-                    
-                    # 再次检查是否取消（LLM分析后）
+            async def analyze_one(file_info):
+                """分析单个文件（仅 LLM 阶段，返回结果，不写 DB）"""
+                async with semaphore:
+                    # 检查是否取消
                     if task_control.is_cancelled(task_id):
-                        print(f"🛑 任务 {task_id} 在LLM分析后被取消")
-                        task.status = "cancelled"
-                        task.completed_at = datetime.now(timezone.utc)
-                        await db.commit()
-                        task_control.cleanup_task(task_id)
-                        return
-                    
-                    # 保存问题
+                        return {'cancelled': True, 'file_info': file_info}
+
+                    # 检查连续失败次数
+                    nonlocal consecutive_failures
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        return {'error': f'连续失败 {consecutive_failures} 次，停止', 'file_info': file_info}
+
+                    try:
+                        # 获取文件内容
+                        if is_ssh_url:
+                            content = file_info.get('content', '')
+                            print(f"📥 正在处理SSH文件: {file_info['path']}")
+                        else:
+                            headers = {}
+                            if repo_type == "gitlab":
+                                token_to_use = file_info.get('token') or gitlab_token
+                                if token_to_use:
+                                    headers["PRIVATE-TOKEN"] = token_to_use
+                            elif repo_type == "gitea":
+                                token_to_use = file_info.get('token') or gitea_token
+                                if token_to_use:
+                                    headers["Authorization"] = f"token {token_to_use}"
+                            elif repo_type == "github":
+                                if github_token:
+                                    headers["Authorization"] = f"Bearer {github_token}"
+                            print(f"📥 正在获取文件: {file_info['path']}")
+                            content = await fetch_file_content(file_info["url"], headers)
+
+                        if not content or not content.strip():
+                            print(f"⚠️ 文件内容为空，跳过: {file_info['path']}")
+                            return {'skipped': True, 'file_info': file_info}
+
+                        if len(content) > settings.MAX_FILE_SIZE_BYTES:
+                            print(f"⚠️ 文件太大，跳过: {file_info['path']}")
+                            return {'skipped': True, 'file_info': file_info}
+
+                        file_lines = content.split('\n')
+                        language = get_language_from_path(file_info["path"])
+
+                        print(f"🤖 正在调用 LLM 分析: {file_info['path']} ({language}, {len(content)} bytes)")
+                        # LLM分析 - 支持规则集和提示词模板
+                        scan_config = (user_config or {}).get('scan_config', {})
+                        rule_set_id = scan_config.get('rule_set_id')
+                        prompt_template_id = scan_config.get('prompt_template_id')
+
+                        if rule_set_id or prompt_template_id:
+                            analysis = await llm_service.analyze_code_with_rules(
+                                content, language,
+                                rule_set_id=rule_set_id,
+                                prompt_template_id=prompt_template_id,
+                                db_session=None  # gather 阶段不写 DB
+                            )
+                        else:
+                            analysis = await llm_service.analyze_code(content, language)
+                        print(f"✅ LLM 分析完成: {file_info['path']}")
+
+                        # 再次检查是否取消
+                        if task_control.is_cancelled(task_id):
+                            return {'cancelled': True, 'file_info': file_info}
+
+                        # 成功，重置连续失败计数
+                        consecutive_failures = 0
+                        return {
+                            'success': True,
+                            'file_info': file_info,
+                            'content': content,
+                            'file_lines': file_lines,
+                            'language': language,
+                            'analysis': analysis
+                        }
+
+                    except Exception as e:
+                        import traceback
+                        print(f"❌ 分析文件失败 ({file_info['path']}): {e}")
+                        print(f"   错误类型: {type(e).__name__}")
+                        print(f"   详细信息: {traceback.format_exc()}")
+                        consecutive_failures += 1
+                        return {'error': str(e), 'file_info': file_info, 'exc_info': traceback.format_exc()}
+
+            # 并发获取所有分析结果
+            results = await asyncio.gather(
+                *[analyze_one(f) for f in files],
+                return_exceptions=True
+            )
+
+            # 检查是否全部取消
+            cancelled_count = sum(1 for r in results if isinstance(r, dict) and r.get('cancelled'))
+            if cancelled_count == len(files):
+                print(f"🛑 任务 {task_id} 已被用户取消")
+                task.status = "cancelled"
+                task.completed_at = datetime.now(timezone.utc)
+                await db.commit()
+                task_control.cleanup_task(task_id)
+                return
+
+            # 批量写入 DB（串行，避免 AsyncSession 竞争）
+            batch_issues = []
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    print(f"❌ gather 异常: {result}")
+                    failed_files += 1
+                    continue
+
+                if result.get('cancelled'):
+                    print(f"⚠️ 文件已取消: {result['file_info']['path']}")
+                    continue
+
+                if result.get('skipped'):
+                    skipped_files += 1
+                    continue
+
+                if 'error' in result:
+                    failed_files += 1
+                    print(f"❌ 文件分析失败: {result['file_info']['path']} - {result['error']}")
+                    continue
+
+                if result.get('success'):
+                    file_info = result['file_info']
+                    analysis = result['analysis']
+                    file_lines = result['file_lines']
+
                     issues = analysis.get("issues", [])
                     for issue in issues:
                         line_num = issue.get("line", 1)
-                        
-                        # 健壮的代码片段提取逻辑
-                        # 优先使用 LLM 返回的片段，如果为空则从源码提取
                         code_snippet = issue.get("code_snippet")
                         if not code_snippet or len(code_snippet.strip()) < 5:
-                            # 从源码提取上下文 (前后2行)
                             try:
-                                # line_num 是 1-based
                                 idx = max(0, int(line_num) - 1)
                                 start = max(0, idx - 2)
                                 end = min(len(file_lines), idx + 3)
@@ -567,7 +608,7 @@ async def scan_repo_task(task_id: str, db_session_factory, user_config: dict = N
                             except Exception:
                                 code_snippet = ""
 
-                        audit_issue = AuditIssue(
+                        batch_issues.append(AuditIssue(
                             task_id=task.id,
                             file_path=file_info["path"],
                             line_number=line_num,
@@ -580,35 +621,27 @@ async def scan_repo_task(task_id: str, db_session_factory, user_config: dict = N
                             code_snippet=code_snippet,
                             ai_explanation=issue.get("ai_explanation"),
                             status="open"
-                        )
-                        db.add(audit_issue)
+                        ))
                         total_issues += 1
-                    
+
                     if "quality_score" in analysis:
                         quality_scores.append(analysis["quality_score"])
-                    
-                    consecutive_failures = 0  # 成功后重置
+
                     scanned_files += 1
-                    
-                    # 更新进度
-                    task.scanned_files = scanned_files
-                    task.total_lines = total_lines
-                    task.issues_count = total_issues
-                    await db.commit()
-                    
-                    print(f"📈 任务 {task_id}: 进度 {scanned_files}/{len(files)} ({int(scanned_files/len(files)*100)}%)")
-                    
-                    # 请求间隔
-                    await asyncio.sleep(llm_gap_ms / 1000)
-                    
-                except Exception as file_error:
-                    failed_files += 1
-                    consecutive_failures += 1
-                    # 打印详细错误信息
-                    import traceback
-                    print(f"❌ 分析文件失败 ({file_info['path']}): {file_error}")
-                    print(f"   错误类型: {type(file_error).__name__}")
-                    print(f"   详细信息: {traceback.format_exc()}")
+
+                    # 批量 commit
+                    if len(batch_issues) >= BATCH_SIZE or i == len(results) - 1:
+                        for issue in batch_issues:
+                            db.add(issue)
+                        batch_issues.clear()
+                        async with progress_lock:
+                            task.scanned_files = scanned_files
+                            task.total_lines = total_lines
+                            task.issues_count = total_issues
+                            await db.commit()
+                            print(f"📈 任务 {task_id}: 进度 {scanned_files}/{len(files)} ({int(scanned_files/len(files)*100)}%)")
+
+                            # 5. 完成任务
                     await asyncio.sleep(llm_gap_ms / 1000)
 
             # 5. 完成任务

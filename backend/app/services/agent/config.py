@@ -32,6 +32,12 @@ class AgentConfig(BaseSettings):
     Example: AGENT_LLM_MAX_RETRIES=5
     """
 
+    # ============ Parallelism Settings ============
+    max_parallel: int = Field(
+        default=5,
+        description="Maximum number of agents executing in parallel"
+    )
+
     # ============ LLM Settings ============
     llm_max_retries: int = Field(
         default=3,

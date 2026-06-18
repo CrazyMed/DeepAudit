@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
@@ -298,16 +299,19 @@ Action Input: {{"参数": "值"}}
                         error_message = match.group(2)
 
                         if error_type == "rate_limit":
-                            # 速率限制 - 等待后重试
+                            # 速率限制 - 指数退避重试
                             api_retry_count = getattr(self, '_api_retry_count', 0) + 1
                             self._api_retry_count = api_retry_count
-                            if api_retry_count >= 3:
+                            if api_retry_count >= 5:
                                 logger.error(f"[{self.name}] Too many rate limit errors, stopping")
                                 await self.emit_event("error", f"API 速率限制重试次数过多: {error_message}")
                                 break
-                            logger.warning(f"[{self.name}] Rate limit hit, waiting before retry ({api_retry_count}/3)")
-                            await self.emit_event("warning", f"API 速率限制，等待后重试 ({api_retry_count}/3)")
-                            await asyncio.sleep(30)  # 等待 30 秒后重试
+                            # 指数退避: 30s → 60s → 120s → 180s → 180s (上限 180s)
+                            backoff = min(30 * (2 ** (api_retry_count - 1)), 180)
+                            jitter = random.uniform(0, backoff * 0.1)  # 10% jitter
+                            logger.warning(f"[{self.name}] Rate limit hit, backing off {backoff:.0f}s+{jitter:.1f}s ({api_retry_count}/5)")
+                            await self.emit_event("warning", f"API 速率限制，{backoff:.0f}秒后重试 ({api_retry_count}/5)")
+                            await asyncio.sleep(backoff + jitter)
                             continue
 
                         elif error_type == "quota_exceeded":
@@ -323,16 +327,18 @@ Action Input: {{"参数": "值"}}
                             break
 
                         elif error_type == "connection":
-                            # 连接错误 - 重试
+                            # 连接错误 - 指数退避重试
                             api_retry_count = getattr(self, '_api_retry_count', 0) + 1
                             self._api_retry_count = api_retry_count
                             if api_retry_count >= 3:
                                 logger.error(f"[{self.name}] Too many connection errors, stopping")
                                 await self.emit_event("error", f"API 连接错误重试次数过多: {error_message}")
                                 break
-                            logger.warning(f"[{self.name}] Connection error, retrying ({api_retry_count}/3)")
-                            await self.emit_event("warning", f"API 连接错误，重试中 ({api_retry_count}/3)")
-                            await asyncio.sleep(5)  # 等待 5 秒后重试
+                            backoff = min(5 * (2 ** (api_retry_count - 1)), 30)
+                            jitter = random.uniform(0, backoff * 0.1)
+                            logger.warning(f"[{self.name}] Connection error, backing off {backoff:.0f}s+{jitter:.1f}s ({api_retry_count}/3)")
+                            await self.emit_event("warning", f"API 连接错误，{backoff:.0f}秒后重试 ({api_retry_count}/3)")
+                            await asyncio.sleep(backoff + jitter)
                             continue
 
                 # 重置 API 重试计数器（成功获取响应后）

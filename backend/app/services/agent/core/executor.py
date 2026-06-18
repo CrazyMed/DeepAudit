@@ -87,7 +87,7 @@ class DynamicAgentExecutor:
         llm_service,
         tools: Dict[str, Any],
         event_emitter=None,
-        max_parallel: int = 5,
+        max_parallel: Optional[int] = None,
         default_timeout: int = 600,
     ):
         """
@@ -97,9 +97,13 @@ class DynamicAgentExecutor:
             llm_service: LLM 服务
             tools: 可用工具
             event_emitter: 事件发射器
-            max_parallel: 最大并行 Agent 数
+            max_parallel: 最大并行 Agent 数（None 时从 AgentConfig 读取）
             default_timeout: 默认超时时间（秒）
         """
+        if max_parallel is None:
+            from ..config import get_agent_config
+            max_parallel = get_agent_config().max_parallel
+
         self.llm_service = llm_service
         self.tools = tools
         self.event_emitter = event_emitter
