@@ -10,13 +10,15 @@ FROM python:3.12-slim
 LABEL maintainer="XCodeReviewer Team"
 LABEL description="Secure sandbox environment for vulnerability verification and security scanning"
 
-# 安装基本工具（bookworm/trixie 源）
-# 🔥 fix: 移除 clang/llvm/cmake（编译器工具链，仅 C/C++ PoC 需要，
-#         占 50MB+ 且大文件下载易超时）。Phase 2 SAST 验证不需要它们。
-#         后续若需 C/C++ 验证再按需加回。
+# 安装基本工具
+# 🔥 换清华源（trixie）：官方 deb.debian.org 大文件下载慢/超时，清华镜像稳定。
+# 恢复 clang/llvm/cmake（用户要求不精简，保留 C/C++ PoC 能力）。
 RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
-    echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/99-retry && \
+    echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/99-retry && \
     echo 'Acquire::http::Timeout "60";' >> /etc/apt/apt.conf.d/99-retry && \
+    # trixie 用 debian.sources 格式，换清华源
+    sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list 2>/dev/null || true && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
     curl \
@@ -31,6 +33,9 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
     default-jdk-headless \
     ruby-full \
     build-essential \
+    cmake \
+    clang \
+    llvm \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装 Node.js (用于 JavaScript/TypeScript 代码执行 和 npm audit)
