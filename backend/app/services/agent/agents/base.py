@@ -1106,6 +1106,9 @@ class BaseAgent(ABC):
 
         Returns:
             工具执行结果字符串
+
+        🔥 修复：同时把结构化 findings 累积到 self._tool_findings，
+        供 Agent 在汇总阶段直接使用，避免依赖 LLM 重述导致 file_path/line 丢失。
         """
         # 🔥 在执行工具前检查取消
         if self.is_cancelled:
@@ -1200,6 +1203,30 @@ class BaseAgent(ABC):
 
             if result.success:
                 output = str(result.data)
+
+                # 🔥 修复：累积 SAST/扫描工具的结构化 findings 到 self._tool_findings。
+                # 这些 findings 带有精确的 file_path/line，比 LLM 重述的可靠。
+                # 仅收集安全扫描类工具的结构化结果。
+                SECURITY_TOOL_NAMES = {
+                    "semgrep_scan", "bandit_scan", "gitleaks_scan",
+                    "trufflehog_scan", "safety_scan", "npm_audit",
+                    "kunlun_scan", "osv_scanner",
+                }
+                if tool_name in SECURITY_TOOL_NAMES and result.metadata:
+                    structured_findings = result.metadata.get("findings") or result.metadata.get("issues") or []
+                    if structured_findings and isinstance(structured_findings, list):
+                        if not hasattr(self, "_tool_findings") or self._tool_findings is None:
+                            self._tool_findings = []
+                        # 标记来源工具，便于后续溯源
+                        for sf in structured_findings[:50]:  # 单工具最多收集 50 条
+                            if isinstance(sf, dict):
+                                sf = dict(sf)  # 浅拷贝避免污染原始 metadata
+                                sf["_source_tool"] = tool_name
+                                self._tool_findings.append(sf)
+                        logger.info(
+                            f"[{self.name}] 工具 {tool_name} 收集到 {len(structured_findings)} 条结构化 findings，"
+                            f"累计 {len(self._tool_findings)} 条"
+                        )
 
                 # 包含 metadata 中的额外信息
                 if result.metadata:

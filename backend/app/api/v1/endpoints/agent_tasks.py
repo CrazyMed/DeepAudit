@@ -1267,7 +1267,26 @@ async def _save_findings(
                 finding.get("location", "").split(":")[0] if ":" in finding.get("location", "") else finding.get("location")
             )
 
-            # 🔥 v2.1: 文件路径验证 - 过滤幻觉发现
+            # 🔥 修复：file_path 为空时，尝试从 title/description 里提取路径模式。
+            # 实测发现 LLM 常把文件路径写进 title 而非 file_path 字段（如
+            # title="server/internal/.../sql_exec.go" 而 file_path 为空）。
+            if not file_path:
+                for text_field in ("title", "description"):
+                    text_val = finding.get(text_field) or ""
+                    # 匹配常见代码路径模式：含目录分隔符的文件路径
+                    match = re.search(r'([\w\-./\\]+\.\w{1,5})', str(text_val))
+                    if match:
+                        candidate = match.group(1)
+                        # 排除明显非路径的（如 .env 这种太短、或带空格）
+                        if "/" in candidate or "\\" in candidate:
+                            file_path = candidate
+                            logger.info(f"[SaveFindings] 从 {text_field} 提取到路径: {file_path}")
+                            break
+
+            # 🔥 修复 v3.0：路径验证降级 —— 不再直接丢弃，改为标记低置信度。
+            # 原逻辑：文件不存在就整个 finding 丢弃（误杀严重，LLM 路径写错但漏洞真实）
+            # 新逻辑：文件存在→正常保存；不存在→仍保存，confidence 降级、verification_method 标注
+            path_verified = True
             if project_root and file_path:
                 # 清理路径（移除可能的行号）
                 clean_path = file_path.split(":")[0].strip() if ":" in file_path else file_path.strip()
@@ -1276,11 +1295,12 @@ async def _save_findings(
                 if not os.path.isfile(full_path):
                     # 尝试作为绝对路径
                     if not (os.path.isabs(clean_path) and os.path.isfile(clean_path)):
-                        logger.warning(
-                            f"[SaveFindings] 🚫 跳过幻觉发现: 文件不存在 '{file_path}' "
+                        # 🔥 不再 continue 丢弃，而是标记为未验证
+                        path_verified = False
+                        logger.info(
+                            f"[SaveFindings] ⚠️ 路径未验证（保留，置信度降级）: '{file_path}' "
                             f"(title: {finding.get('title', 'N/A')[:50]})"
                         )
-                        continue  # 跳过这个发现
 
             # 🔥 Handle line numbers (support multiple formats)
             line_start = finding.get("line_start") or finding.get("line")
@@ -1333,6 +1353,10 @@ async def _save_findings(
                     confidence = float(confidence)
                 except ValueError:
                     confidence = 0.5
+            # 🔥 修复：路径未验证的 finding 置信度降级（从 0.5 压到 0.3）
+            # 提示后续验证 Agent 优先处理这些"定位存疑"的发现
+            if not path_verified:
+                confidence = min(confidence, 0.3)
 
             # 🔥 Handle verification status
             is_verified = finding.get("is_verified", False)
@@ -1355,9 +1379,14 @@ async def _save_findings(
 
             # 🔥 Handle verification details
             verification_method = finding.get("verification_method")
+            # 🔥 修复：路径未验证的 finding 标注来源，提示需要人工确认定位
+            if not path_verified:
+                verification_method = "path_unverified_needs_manual_review"
             verification_result = None
             if finding.get("verification_details"):
                 verification_result = {"details": finding.get("verification_details")}
+            elif not path_verified:
+                verification_result = {"path_verified": False, "note": "LLM 提供的路径未能匹配实际文件，定位待确认"}
 
             # 🔥 Handle CWE and CVSS
             cwe_id = finding.get("cwe_id") or finding.get("cwe")

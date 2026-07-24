@@ -384,6 +384,134 @@ class AnalysisAgent(BaseAgent):
     
 
     
+    def _normalize_tool_findings(self) -> List[Dict[str, Any]]:
+        """把 SAST 工具收集的结构化 findings 转成标准漏洞格式。
+
+        不同工具返回结构不同，这里统一归一化：
+        - Semgrep: {path, start.line, extra.{message,severity,lines}, check_id}
+        - Bandit:  {filename, line_number, issue_{text,severity}, test_id}
+        - 通用:    {file_path/file, line, severity, message/description}
+
+        归一化后字段对齐 SaveFindings 的期望：
+        vulnerability_type / severity / title / description /
+        file_path / line_start / code_snippet / source / sink / suggestion / confidence
+        """
+        tool_findings = getattr(self, "_tool_findings", None) or []
+        if not tool_findings:
+            return []
+
+        normalized = []
+        seen_keys = set()  # 去重（同一文件+行+类型）
+
+        for tf in tool_findings:
+            if not isinstance(tf, dict):
+                continue
+
+            source_tool = tf.get("_source_tool", "unknown")
+
+            # ---- 抽取 file_path ----
+            file_path = (
+                tf.get("file_path") or tf.get("path") or tf.get("filename")
+                or tf.get("file") or ""
+            )
+            # gitleaks 等可能用 ResultFile 结构，尝试嵌套
+            if not file_path:
+                file_path = tf.get("RuleID", "") and ""  # 占位，无路径则空
+
+            # ---- 抽取 line_start ----
+            line_start = (
+                tf.get("line_start") or tf.get("line")
+                or tf.get("start", {}).get("line") if isinstance(tf.get("start"), dict) else None
+                or tf.get("line_number")
+                or 0
+            )
+            try:
+                line_start = int(line_start)
+            except (TypeError, ValueError):
+                line_start = 0
+
+            # ---- 抽取 severity（统一到 critical/high/medium/low/info）----
+            extra = tf.get("extra", {}) if isinstance(tf.get("extra"), dict) else {}
+            raw_sev = (
+                tf.get("severity") or extra.get("severity")
+                or tf.get("issue_severity") or tf.get("level")
+                or "medium"
+            )
+            sev_str = str(raw_sev).lower().strip()
+            # Semgrep 用 ERROR/WARNING/INFO
+            sev_map = {
+                "error": "high", "warning": "medium", "info": "low",
+                "critical": "critical", "high": "high", "medium": "medium",
+                "low": "low", "moderate": "medium", "minor": "low",
+            }
+            severity = sev_map.get(sev_str, "medium")
+
+            # ---- 抽取漏洞类型与标题 ----
+            check_id = tf.get("check_id") or tf.get("test_id") or tf.get("test_name") or ""
+            vuln_type = self._infer_vuln_type(check_id, tf)
+            title = tf.get("title") or check_id or f"{source_tool} 发现"
+
+            # ---- 抽取描述与代码片段 ----
+            description = (
+                tf.get("description") or extra.get("message")
+                or tf.get("issue_text") or tf.get("message")
+                or f"由 {source_tool} 检出"
+            )
+            code_snippet = (
+                tf.get("code_snippet") or extra.get("lines")
+                or tf.get("code") or ""
+            )
+
+            # ---- 去重 key：文件+行+类型 ----
+            dedup_key = f"{file_path}:{line_start}:{vuln_type}"
+            if dedup_key in seen_keys:
+                continue
+            seen_keys.add(dedup_key)
+
+            normalized.append({
+                "vulnerability_type": vuln_type,
+                "severity": severity,
+                "title": str(title)[:200],
+                "description": str(description)[:1000],
+                "file_path": file_path,
+                "line_start": line_start,
+                "line_end": line_start,
+                "code_snippet": str(code_snippet)[:500],
+                "source": "",
+                "sink": "",
+                "suggestion": "",  # SAST 不给修复建议，留给 LLM 研判或后续补
+                "confidence": 0.85,  # SAST 规则匹配，置信度较高
+                "needs_verification": True,
+                "_from_sast": True,
+                "_source_tool": source_tool,
+            })
+
+        logger.info(f"[{self.name}] SAST findings 归一化: {len(tool_findings)} → {len(normalized)}（去重后）")
+        return normalized
+
+    def _infer_vuln_type(self, check_id: str, finding: Dict) -> str:
+        """根据规则 ID / 内容推断标准漏洞类型。"""
+        text = f"{check_id} {finding.get('title', '')} {finding.get('description', '')}".lower()
+        if "sql" in text or "sqli" in text:
+            return "sql_injection"
+        if "xss" in text or "cross-site" in text:
+            return "xss"
+        if "command" in text or "exec" in text or "rce" in text or "os_system" in text:
+            return "command_injection"
+        if "traversal" in text or "path" in text or "lfi" in text:
+            return "path_traversal"
+        if "ssrf" in text:
+            return "ssrf"
+        if "xxe" in text:
+            return "xxe"
+        if "secret" in text or "password" in text or "credential" in text or "hardcoded" in text:
+            return "hardcoded_secret"
+        if "deserial" in text or "pickle" in text:
+            return "deserialization"
+        if "crypto" in text or "weak" in text:
+            return "weak_crypto"
+        return "other"
+
     async def run(self, input_data: Dict[str, Any]) -> AgentResult:
         """
         执行漏洞分析 - LLM 全程参与！
@@ -487,6 +615,7 @@ class AnalysisAgent(BaseAgent):
         self._steps = []
         all_findings = []
         error_message = None  # 🔥 跟踪错误信息
+        self._tool_findings = []  # 🔥 初始化 SAST 结构化 findings 收集器
         
         await self.emit_thinking("🔬 Analysis Agent 启动，LLM 开始自主安全分析...")
         
@@ -758,6 +887,15 @@ Final Answer:""",
             
             # 标准化发现
             logger.info(f"[{self.name}] Standardizing {len(all_findings)} findings")
+
+            # 🔥 修复：把 SAST 工具的结构化 findings 转成标准格式并合并。
+            # SAST 结果带精确 file_path/line，是 LLM 重述的可靠补充/替代。
+            sast_findings = self._normalize_tool_findings()
+            if sast_findings:
+                logger.info(f"[{self.name}] 合并 {len(sast_findings)} 条 SAST 结构化 findings")
+                # SAST findings 放在最前（精确度高），LLM findings 追加在后
+                all_findings = sast_findings + all_findings
+
             standardized_findings = []
             for finding in all_findings:
                 # 确保 finding 是字典
