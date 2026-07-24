@@ -8,14 +8,11 @@ LABEL maintainer="XCodeReviewer Team"
 LABEL description="Secure sandbox environment for vulnerability verification and security scanning"
 
 # 安装基本工具
-# 使用阿里云镜像加速 apt
-# 🔥 fix: openjdk-11 安全源下载不稳定，换 openjdk-17（bullseye 可用，且 11 已过时）；
-#         加 --fix-missing 容错，应对镜像源间歇性连接失败
+# 🔥 fix: 阿里云 debian-security 镜像源对大文件(openjdk deb)连接不稳定，
+#         改用官方 deb.debian.org 源（本机 Docker 网络可正常访问官方源）
 RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
-    sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list && \
-    sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list && \
     apt-get update && \
-    apt-get install -y --no-install-recommends --fix-missing \
+    apt-get install -y --no-install-recommends \
     curl \
     wget \
     netcat-openbsd \
