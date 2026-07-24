@@ -606,8 +606,14 @@ class AnalysisAgent(BaseAgent):
 
             try:
                 # 调用工具的 execute（走 base.py 的 _tool_findings 收集器）
-                # 用通用参数：target_path="." 全量扫
-                result = await tool.execute(target_path=scan_target)
+                # 🔥 不同工具参数不同：大部分接受 target_path，
+                # SafetyTool 要 requirements_file，NpmAuditTool 要 target_path。
+                # 先试 target_path，参数不匹配则用各工具默认参数（无参 execute）。
+                try:
+                    result = await tool.execute(target_path=scan_target)
+                except TypeError:
+                    # 该工具不接受 target_path，用默认参数（依赖其内部默认值）
+                    result = await tool.execute()
                 duration = int((_time.time() - start) * 1000)
 
                 # 累积结构化 findings（复用 base.py 的收集逻辑）
