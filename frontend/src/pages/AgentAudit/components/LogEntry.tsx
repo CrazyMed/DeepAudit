@@ -142,7 +142,10 @@ export const LogEntry = memo(function LogEntry({ item, isExpanded, onToggle }: L
 
             {/* Title - for non-thinking types */}
             {!isThinking && (
-              <span className="text-sm text-foreground font-medium truncate flex-1">
+              <span
+                className="text-sm text-foreground font-medium break-words min-w-0 flex-1"
+                title={formattedTitle}
+              >
                 {formattedTitle}
               </span>
             )}

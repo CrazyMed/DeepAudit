@@ -530,7 +530,18 @@ async def _execute_agent_task(task_id: str):
 
                 # 🔥 v2.1: 传递 project_root 用于文件路径验证
                 saved_count = await _save_findings(db, task_id, findings, project_root=project_root)
-                logger.info(f"[AgentTask] Saved {saved_count}/{len(findings)} findings (filtered {len(findings) - saved_count} hallucinations)")
+                filtered_count = len(findings) - saved_count
+                logger.info(f"[AgentTask] Saved {saved_count}/{len(findings)} findings (filtered {filtered_count} hallucinations)")
+
+                # 🔥 发送明确的结果提示事件给前端（解决"0 findings 不知是干净还是失败"）
+                from app.services.findings_feedback import build_findings_summary_message
+                summary_msg = build_findings_summary_message(
+                    total_findings=len(findings),
+                    saved_findings=saved_count,
+                    filtered_count=filtered_count,
+                    intercepted=False,  # TODO: 后续接入 LLM 拦截追踪
+                )
+                await event_emitter.emit_info(summary_msg)
 
                 # 更新任务统计
                 # 🔥 CRITICAL FIX: 在设置完成前再次检查取消状态
