@@ -1229,36 +1229,16 @@ async def _save_findings(
             ).lower().strip()
             severity_enum = severity_map.get(raw_severity, VulnerabilitySeverity.MEDIUM)
 
-            # 🔥 Handle vulnerability type (case-insensitive & snake_case normalization)
-            # Support multiple field names: vulnerability_type, type, vuln_type
-            raw_type = str(
+            # 🔥 Handle vulnerability type —— 提取到 vuln_classifier，修复子串误匹配 bug
+            # 支持多个字段名：vulnerability_type / type / vuln_type
+            raw_type = (
                 finding.get("vulnerability_type") or
                 finding.get("type") or
                 finding.get("vuln_type") or
                 "other"
-            ).lower().strip().replace(" ", "_").replace("-", "_")
-
-            type_enum = type_map.get(raw_type, VulnerabilityType.OTHER)
-
-            # 🔥 Additional fallback for common Agent output variations
-            if "sqli" in raw_type or "sql" in raw_type:
-                type_enum = VulnerabilityType.SQL_INJECTION
-            if "xss" in raw_type:
-                type_enum = VulnerabilityType.XSS
-            if "rce" in raw_type or "command" in raw_type or "cmd" in raw_type:
-                type_enum = VulnerabilityType.COMMAND_INJECTION
-            if "traversal" in raw_type or "lfi" in raw_type or "rfi" in raw_type:
-                type_enum = VulnerabilityType.PATH_TRAVERSAL
-            if "ssrf" in raw_type:
-                type_enum = VulnerabilityType.SSRF
-            if "xxe" in raw_type:
-                type_enum = VulnerabilityType.XXE
-            if "auth" in raw_type:
-                type_enum = VulnerabilityType.AUTH_BYPASS
-            if "secret" in raw_type or "credential" in raw_type or "password" in raw_type:
-                type_enum = VulnerabilityType.HARDCODED_SECRET
-            if "deserial" in raw_type:
-                type_enum = VulnerabilityType.DESERIALIZATION
+            )
+            from app.services.vuln_classifier import classify_vulnerability_type
+            type_enum = classify_vulnerability_type(raw_type)
 
             # 🔥 Handle file path (support multiple field names)
             file_path = (
