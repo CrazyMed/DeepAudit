@@ -8,9 +8,13 @@ LABEL maintainer="XCodeReviewer Team"
 LABEL description="Secure sandbox environment for vulnerability verification and security scanning"
 
 # 安装基本工具
-# 🔥 fix: 阿里云 debian-security 镜像源对大文件(openjdk deb)连接不稳定，
-#         改用官方 deb.debian.org 源（本机 Docker 网络可正常访问官方源）
+# 🔥 fix: debian-security 镜像源（阿里云/官方）对大文件(openjdk/ruby deb)
+#         间歇性 Connection failed/502。方案：用官方源 + 配置 apt 重试5次 +
+#         超时60s，并对安装失败重试（apt 在单包失败时会自动重试下载）。
 RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
+    echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/99-retry && \
+    echo 'Acquire::http::Timeout "60";' >> /etc/apt/apt.conf.d/99-retry && \
+    echo 'Acquire::https::Timeout "60";' >> /etc/apt/apt.conf.d/99-retry && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
     curl \
