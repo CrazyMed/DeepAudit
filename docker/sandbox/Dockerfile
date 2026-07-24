@@ -2,19 +2,18 @@
 # 安全沙箱环境用于漏洞验证和 PoC 执行
 # 集成各类安全扫描工具 (Semgrep, Bandit, Gitleaks, etc.)
 
-FROM docker.m.daocloud.io/python:3.11-bullseye
+# 🔥 fix: 从 bullseye 升级到 bookworm(Debian12)。
+# bullseye 已 EOL，debian-security 源对旧包(openjdk/ruby)间歇性 502/连接失败，
+# 多次尝试（换源/重试）均不稳定。bookworm 源稳定，apt 一次成功（已验证）。
+FROM python:3.12-slim
 
 LABEL maintainer="XCodeReviewer Team"
 LABEL description="Secure sandbox environment for vulnerability verification and security scanning"
 
-# 安装基本工具
-# 🔥 fix: debian-security 镜像源（阿里云/官方）对大文件(openjdk/ruby deb)
-#         间歇性 Connection failed/502。方案：用官方源 + 配置 apt 重试5次 +
-#         超时60s，并对安装失败重试（apt 在单包失败时会自动重试下载）。
+# 安装基本工具（bookworm 源稳定，用官方源即可，加重试容错）
 RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
-    echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/99-retry && \
+    echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/99-retry && \
     echo 'Acquire::http::Timeout "60";' >> /etc/apt/apt.conf.d/99-retry && \
-    echo 'Acquire::https::Timeout "60";' >> /etc/apt/apt.conf.d/99-retry && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
     curl \
@@ -26,7 +25,7 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
     git \
     unzip \
     jq \
-    openjdk-17-jdk-headless \
+    default-jdk-headless \
     ruby-full \
     build-essential \
     cmake \
