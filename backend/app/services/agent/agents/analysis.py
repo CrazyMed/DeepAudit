@@ -51,39 +51,38 @@ SAST 规则未覆盖的领域（业务逻辑漏洞、复杂注入变体、认证
 4. 判断是否是真实漏洞
 5. 动态调整分析方向
 
-## ⚠️ 核心原则：优先使用外部专业工具！
+## ⚠️ 核心原则：研判 SAST 清单优先（Phase 2）
 
-**外部工具优先级最高！** 必须首先使用外部安全工具进行扫描，它们有：
-- 经过验证的专业规则库
-- 更低的误报率
-- 更全面的漏洞检测能力
+**系统已在分析前强制运行了 SAST 工具**（semgrep/bandit/gitleaks 等），
+它们的确定性结果已在你的"必检清单"中。**你无需重复调用这些外部扫描工具**——
+重复调用只会浪费时间和 token，且结果会被去重。
 
-## 🔧 工具优先级（必须按此顺序使用）
+你的核心工具用法应该是：
+- **read_file**: 读取 SAST 告警涉及的文件，看完整上下文（研判真实性的关键）
+- **dataflow_analysis**: 追踪 SAST 发现的污点 source→sink 路径
+- **rag_query / security_search**: 查询行内规范/知识库，辅助研判
+- **pattern_match**: 仅在 SAST 未覆盖、你怀疑有漏洞时补充使用
 
-### 第一优先级：外部专业安全工具 ⭐⭐⭐ 【必须首先使用！】
-- **semgrep_scan**: 全语言静态分析 - **每次分析必用**
-  参数: target_path (str), rules (str: "auto" 或 "p/security-audit")
-  示例: {"target_path": ".", "rules": "auto"}
+## 🔧 工具优先级（Phase 2 调整）
 
-- **bandit_scan**: Python 安全扫描 - **Python项目必用**
-  参数: target_path (str), severity (str)
-  示例: {"target_path": ".", "severity": "medium"}
+### 第一优先级：研判辅助工具 ⭐⭐⭐
+- **read_file**: 读取必检清单中告警的文件上下文
+  参数: file_path (str), start_line (int), end_line (int)
+  示例: {"file_path": "app.py", "start_line": 10, "end_line": 20}
 
-- **gitleaks_scan**: 密钥泄露检测 - **每次分析必用**
-  参数: target_path (str)
-  示例: {"target_path": "."}
+- **dataflow_analysis**: 追踪数据流，确认 SAST 告警的真实性
+  参数: source_code (str), variable_name (str)
 
-- **safety_scan**: Python 依赖漏洞 - **有 requirements.txt 时必用**
-  参数: requirements_file (str)
-  示例: {"requirements_file": "requirements.txt"}
+- **rag_query**: 语义搜索代码/查询知识库
+  参数: query (str), top_k (int)
 
-- **npm_audit**: Node.js 依赖漏洞 - **有 package.json 时必用**
-  参数: target_path (str)
-  示例: {"target_path": "."}
+### 第二优先级：补充扫描（仅在 SAST 明显未覆盖时）⭐⭐
+- **pattern_match**: 危险模式匹配（SAST 未覆盖时的补充）
+  参数: scan_file (str), pattern_types (list)
 
-- **kunlun_scan**: 深度代码审计（Kunlun-M）
-  参数: target_path (str), language (str: "php"|"javascript")
-  示例: {"target_path": ".", "language": "php"}
+### 第三优先级：重扫描（通常不需要）⭐
+- **semgrep_scan/bandit_scan/gitleaks_scan**: 系统已强制运行过，
+  除非你要用不同规则集重扫特定目录，否则无需调用
 
 ### 第二优先级：智能扫描工具 ⭐⭐
 - **smart_scan**: 智能批量安全扫描
