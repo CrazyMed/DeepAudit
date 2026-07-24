@@ -26,7 +26,24 @@ logger = logging.getLogger(__name__)
 
 ANALYSIS_SYSTEM_PROMPT = """你是 DeepAudit 的漏洞分析 Agent，一个**自主**的安全专家。
 
-## 你的角色
+## 🎯 Phase 2：SAST 主导 + LLM 研判（核心工作模式）
+你的工作分两条线，**主路是研判，旁路是补充**：
+
+**主路（研判 SAST 清单，占 80% 精力）**：
+系统已在分析前强制运行了 SAST 工具（Semgrep/Bandit/Gitleaks 等），
+并把它们的确定性结果作为"必检清单"提供给你。这些告警带有精确的
+file_path 和 line_start，可靠性远高于你凭记忆重述。你的首要任务是：
+1. 逐条研判清单中的告警 → 确认真实漏洞，或识别为误报并说明原因
+2. 对确认的漏洞，补充上下文：污点来源(source)、危险汇点(sink)、数据流路径
+3. 给出具体可执行的修复建议（代码级，不要泛泛而谈）
+
+**旁路（LLM 自主补充，占 20% 精力）**：
+SAST 规则未覆盖的领域（业务逻辑漏洞、复杂注入变体、认证/授权缺陷），
+你可以自主发现。但**必须在 Final Answer 里给这些 finding 加上
+`"_from_llm_supplement": true` 字段**，系统会把它们标为低置信度待人工确认，
+绝不与 SAST 确认的高置信结果混在一起。
+
+## 你的角色（传统职责，仍然适用）
 你是安全审计的**核心大脑**，不是工具执行器。你需要：
 1. 自主制定分析策略
 2. 选择最有效的工具和方法
@@ -512,6 +529,171 @@ class AnalysisAgent(BaseAgent):
             return "weak_crypto"
         return "other"
 
+    # SAST 工具与其适用语言的映射（Recon 驱动选工具）
+    SAST_TOOL_BY_LANGUAGE = {
+        "python": ["semgrep_scan", "bandit_scan", "gitleaks_scan", "safety_scan"],
+        "javascript": ["semgrep_scan", "gitleaks_scan", "npm_audit"],
+        "typescript": ["semgrep_scan", "gitleaks_scan", "npm_audit"],
+        "java": ["semgrep_scan", "gitleaks_scan"],
+        "go": ["semgrep_scan", "gitleaks_scan"],
+        "php": ["semgrep_scan", "gitleaks_scan"],
+        "ruby": ["semgrep_scan", "gitleaks_scan"],
+        "c": ["semgrep_scan", "gitleaks_scan"],
+        "cpp": ["semgrep_scan", "gitleaks_scan"],
+    }
+    # 默认工具（语言未知或 Recon 失败时）：至少跑 semgrep + gitleaks
+    DEFAULT_SAST_TOOLS = ["semgrep_scan", "gitleaks_scan"]
+
+    def _select_sast_tools(self, tech_stack: Dict[str, Any]) -> List[str]:
+        """根据 Recon 识别的技术栈，选择适用的 SAST 工具（Recon 驱动选规则）。"""
+        languages = tech_stack.get("languages", []) if isinstance(tech_stack, dict) else []
+        if isinstance(languages, str):
+            languages = [languages]
+        # 统一小写
+        langs_lower = [str(l).lower().strip() for l in languages if l]
+
+        selected = set()
+        for lang in langs_lower:
+            for tool in self.SAST_TOOL_BY_LANGUAGE.get(lang, []):
+                selected.add(tool)
+
+        # gitleaks（密钥泄露）对所有语言都适用，确保包含
+        selected.add("gitleaks_scan")
+
+        # 仅保留实际可用的工具（self.tools 里存在的）
+        available = [t for t in selected if t in self.tools]
+
+        if not available:
+            available = [t for t in self.DEFAULT_SAST_TOOLS if t in self.tools]
+
+        logger.info(f"[{self.name}] Recon 驱动选 SAST 工具: languages={langs_lower} → {available}")
+        return available
+
+    async def _run_mandatory_sast_scan(self, tech_stack: Dict[str, Any], target_files: List[str]) -> str:
+        """Phase 2 核心：强制前置 SAST 全量扫描。
+
+        在 ReAct 循环开始前，代码层面直接调用选定的 SAST 工具，
+        不依赖 LLM 决策。结果累积到 self._tool_findings（经 base.py 收集器），
+        同时返回结构化摘要供注入 LLM 作为"必检清单"。
+
+        Returns:
+            sast_briefing: 给 LLM 的 SAST 结果简报文本（含每条告警的文件/行/类型）
+        """
+        import time as _time
+        await self.emit_thinking("🔍 Phase 2: 强制 SAST 全量前置扫描启动（零漏报下限保证）...")
+
+        sast_tools = self._select_sast_tools(tech_stack)
+        if not sast_tools:
+            logger.warning(f"[{self.name}] 无可用 SAST 工具，跳过强制前置扫描")
+            return "（无可用 SAST 工具，请使用内置工具分析）"
+
+        scan_target = "."
+        # 若用户指定了目标文件，仍用 "." 全量扫（SAST 全检是零漏报下限的保证）
+        # 但在 briefing 里提示 Agent 重点关注目标文件
+
+        briefing_lines = []
+        total_findings = 0
+
+        for tool_name in sast_tools:
+            if self.is_cancelled:
+                break
+            tool = self.tools.get(tool_name)
+            if tool is None:
+                continue
+
+            await self.emit_event("info", f"⚡ 强制执行 SAST: {tool_name}")
+            start = _time.time()
+
+            try:
+                # 调用工具的 execute（走 base.py 的 _tool_findings 收集器）
+                # 用通用参数：target_path="." 全量扫
+                result = await tool.execute(target_path=scan_target)
+                duration = int((_time.time() - start) * 1000)
+
+                # 累积结构化 findings（复用 base.py 的收集逻辑）
+                # base.py 的 execute_tool 会收集，但这里是直接调 tool.execute，
+                # 需手动喂给 _tool_findings 收集器
+                self._collect_tool_result(tool_name, result)
+
+                count = 0
+                if result.success and result.metadata:
+                    count = len(result.metadata.get("findings") or result.metadata.get("issues") or [])
+                total_findings += count
+                briefing_lines.append(
+                    f"- {tool_name}: {'成功' if result.success else '失败'}, "
+                    f"{count} 条告警, {duration}ms"
+                )
+                logger.info(f"[{self.name}] 强制 SAST {tool_name}: success={result.success}, findings={count}, {duration}ms")
+
+            except Exception as e:
+                logger.warning(f"[{self.name}] 强制 SAST {tool_name} 异常: {e}")
+                briefing_lines.append(f"- {tool_name}: 异常 ({str(e)[:80]})")
+
+        # 构建给 LLM 的必检清单
+        normalized = self._normalize_tool_findings()
+        await self.emit_event(
+            "info",
+            f"✅ SAST 前置扫描完成: {len(sast_tools)} 个工具, 共 {total_findings} 条原始告警, "
+            f"归一化后 {len(normalized)} 条（去重）"
+        )
+
+        if not normalized:
+            return (
+                "SAST 全量扫描完成，未发现明确安全问题。\n"
+                "请使用 read_file / RAG 工具复核高风险区域，并以 LLM 自主发现补充（标注为低置信）。"
+            )
+
+        # 按严重度排序，截断避免过长
+        sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+        normalized_sorted = sorted(
+            normalized,
+            key=lambda x: sev_order.get(x.get("severity", "low"), 3)
+        )
+        show_list = normalized_sorted[:30]  # 给 LLM 看前 30 条
+
+        lines = [
+            f"## 🔴 SAST 强制扫描结果（必检清单，共 {len(normalized)} 条，展示前 {len(show_list)} 条）",
+            "以下每一条都带有精确的文件路径和行号，由 Semgrep/Bandit/Gitleaks 等工具确定性地检出。",
+            "你的首要任务是**研判**这些告警（确认真实漏洞 / 排除误报），而非重新发现漏洞。",
+            "",
+        ]
+        for i, f in enumerate(show_list, 1):
+            lines.append(
+                f"{i}. [{f.get('severity','?').upper()}] {f.get('vulnerability_type','other')} "
+                f"| {f.get('file_path','?')}:{f.get('line_start',0)} "
+                f"| 来源:{f.get('_source_tool','?')}"
+            )
+            desc = f.get("description", "")
+            if desc:
+                lines.append(f"   描述: {desc[:120]}")
+
+        if len(normalized) > len(show_list):
+            lines.append(f"\n... 另有 {len(normalized) - len(show_list)} 条未展示（已收集，会直接进报告）")
+
+        return "\n".join(lines)
+
+    def _collect_tool_result(self, tool_name: str, result) -> None:
+        """把直接调用的工具结果喂给 _tool_findings 收集器（复用 base.py 逻辑）。"""
+        SECURITY_TOOL_NAMES = {
+            "semgrep_scan", "bandit_scan", "gitleaks_scan",
+            "trufflehog_scan", "safety_scan", "npm_audit",
+            "kunlun_scan", "osv_scanner", "osv_scan",
+        }
+        if tool_name not in SECURITY_TOOL_NAMES:
+            return
+        if not (result.success and result.metadata):
+            return
+        structured = result.metadata.get("findings") or result.metadata.get("issues") or []
+        if not isinstance(structured, list) or not structured:
+            return
+        if not hasattr(self, "_tool_findings") or self._tool_findings is None:
+            self._tool_findings = []
+        for sf in structured[:50]:
+            if isinstance(sf, dict):
+                sf = dict(sf)
+                sf["_source_tool"] = tool_name
+                self._tool_findings.append(sf)
+
     async def run(self, input_data: Dict[str, Any]) -> AgentResult:
         """
         执行漏洞分析 - LLM 全程参与！
@@ -606,18 +788,39 @@ class AnalysisAgent(BaseAgent):
         # 🔥 记录工作开始
         self.record_work("开始安全漏洞分析")
 
+        self._steps = []
+        all_findings = []
+        error_message = None  # 🔥 跟踪错误信息
+        self._tool_findings = []  # 🔥 初始化 SAST 结构化 findings 收集器
+
+        # 🔥 Phase 2 核心：强制 SAST 全量前置扫描（不依赖 LLM 决策）。
+        # 先跑 SAST 拿到必检清单，再让 LLM 研判 —— 锁定零漏报下限。
+        try:
+            sast_briefing = await self._run_mandatory_sast_scan(tech_stack, target_files)
+        except Exception as e:
+            logger.warning(f"[{self.name}] 强制 SAST 前置扫描异常（降级为纯 LLM 模式）: {e}")
+            sast_briefing = f"（SAST 前置扫描异常: {str(e)[:100]}，请使用内置工具分析）"
+
+        # 把 SAST 必检清单注入 initial_message
+        initial_message += f"""
+
+## 🔴 SAST 强制扫描结果（你的首要研判对象）
+{sast_briefing}
+
+## ⚠️ Phase 2 研判纪律（必须遵守）
+1. **首要任务**：研判上面 SAST 清单中的每一条告警——确认是真实漏洞，还是误报。
+2. **不要重新发现** SAST 已经覆盖的漏洞。你的价值在于：① 排除误报 ② 补充数据流/攻击链上下文 ③ 给修复建议。
+3. **SAST 漏报区域**：SAST 规则没覆盖的（如业务逻辑漏洞、复杂注入变体），你可以自主发现，但必须在 Final Answer 里用 `"_from_llm_supplement": true` 标注，这些会被标为低置信度。
+4. 确认 SAST 告警时，保留其 file_path/line_start（不要改写），补充 source/sink/dataflow。
+"""
+
         # 初始化对话历史
         self._conversation_history = [
             {"role": "system", "content": self.config.system_prompt},
             {"role": "user", "content": initial_message},
         ]
-        
-        self._steps = []
-        all_findings = []
-        error_message = None  # 🔥 跟踪错误信息
-        self._tool_findings = []  # 🔥 初始化 SAST 结构化 findings 收集器
-        
-        await self.emit_thinking("🔬 Analysis Agent 启动，LLM 开始自主安全分析...")
+
+        await self.emit_thinking("🔬 Analysis Agent 启动，开始研判 SAST 清单...")
         
         try:
             for iteration in range(self.config.max_iterations):
@@ -917,6 +1120,20 @@ Final Answer:""",
                     "confidence": finding.get("confidence", 0.7),
                     "needs_verification": finding.get("needs_verification", True),
                 }
+                # 🔥 Phase 2.4：旁路标记 —— 区分 SAST 确认 vs LLM 自主补充。
+                # SAST 来源（_from_sast）保持高置信；LLM 自主补充（_from_llm_supplement）
+                # 或无来源标记的，降级置信度，标 needs_verification=True 待人工确认。
+                if finding.get("_from_sast"):
+                    standardized["_from_sast"] = True
+                    standardized["_source_tool"] = finding.get("_source_tool", "sast")
+                    # SAST 确认的，置信度不低于 0.8
+                    if standardized["confidence"] < 0.8:
+                        standardized["confidence"] = 0.85
+                else:
+                    # LLM 自主补充（旁路发现）
+                    standardized["_from_llm_supplement"] = True
+                    standardized["confidence"] = min(standardized["confidence"], 0.4)
+                    standardized["needs_verification"] = True
                 standardized_findings.append(standardized)
             
             await self.emit_event(
