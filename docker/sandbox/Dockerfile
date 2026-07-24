@@ -22,7 +22,6 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
     git \
     unzip \
     jq \
-    php-cli \
     openjdk-17-jdk-headless \
     ruby-full \
     build-essential \
