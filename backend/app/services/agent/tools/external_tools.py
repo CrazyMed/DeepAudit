@@ -86,7 +86,7 @@ class SemgrepInput(BaseModel):
     )
     rules: Optional[str] = Field(
         default="p/security-audit",
-        description="规则集: p/security-audit, p/owasp-top-ten, p/r2c-security-audit"
+        description="规则集: p/security-audit, p/owasp-top-ten, 或本地规则目录路径（如 /workspace/rules）"
     )
     severity: Optional[str] = Field(
         default=None,
@@ -189,7 +189,13 @@ Semgrep 是业界领先的静态分析工具，支持 30+ 种编程语言。
             return ToolResult(success=False, data=error_msg, error=error_msg)
         
         cmd = ["semgrep", "--json", "--quiet"]
-        
+
+        # 🔥 Phase 1.5: 优先使用本地规则（不联网），无本地规则才回退在线规则集
+        if rules in ("auto", "p/security-audit"):
+            from app.services.rule_loader import get_rule_config_argument
+            local_rules_dir = os.path.join(self.project_root, "rules")
+            rules = get_rule_config_argument(local_rules_dir, fallback=rules)
+
         if rules == "auto":
             # 🔥 Fallback if user explicitly requests 'auto', but prefer security-audit
             cmd.extend(["--config", "p/security-audit"])
