@@ -435,12 +435,18 @@ class AnalysisAgent(BaseAgent):
                 file_path = tf.get("RuleID", "") and ""  # 占位，无路径则空
 
             # ---- 抽取 line_start ----
+            # 支持多种字段名：line_start/line/line_number（Bandit）/
+            # start.line（Semgrep）/ StartLine（Gitleaks 驼峰）
             line_start = (
-                tf.get("line_start") or tf.get("line")
-                or tf.get("start", {}).get("line") if isinstance(tf.get("start"), dict) else None
+                tf.get("line_start")
+                or tf.get("line")
                 or tf.get("line_number")
-                or 0
+                or tf.get("StartLine")
             )
+            if not line_start and isinstance(tf.get("start"), dict):
+                line_start = tf["start"].get("line")
+            if not line_start:
+                line_start = 0
             try:
                 line_start = int(line_start)
             except (TypeError, ValueError):
@@ -506,25 +512,48 @@ class AnalysisAgent(BaseAgent):
         return normalized
 
     def _infer_vuln_type(self, check_id: str, finding: Dict) -> str:
-        """根据规则 ID / 内容推断标准漏洞类型。"""
-        text = f"{check_id} {finding.get('title', '')} {finding.get('description', '')}".lower()
-        if "sql" in text or "sqli" in text:
+        """根据规则 ID / 内容推断标准漏洞类型。
+
+        把连字符/下划线归一化为空格后做单词边界匹配，
+        避免短关键词误匹配（如 "rce" 匹配 "source"），
+        同时支持 check_id 形式（sql-injection）和自然语言（SQL injection）。
+        """
+        import re
+        # 收集所有可能含漏洞信息的字段（不同工具字段名不同）
+        text_parts = [check_id]
+        for key in ("title", "description", "issue_text", "test_name",
+                    "message", "RuleID", "Description"):
+            val = finding.get(key)
+            if val:
+                text_parts.append(str(val))
+        raw = " ".join(text_parts).lower()
+        # 归一化：连字符/下划线 → 空格，便于单词边界匹配
+        text = re.sub(r'[-_]', ' ', raw)
+
+        def has(word):
+            return re.search(r'\b' + re.escape(word) + r'\b', text) is not None
+
+        if has("sql") or has("sqli"):
             return "sql_injection"
-        if "xss" in text or "cross-site" in text:
+        if has("xss") or has("cross site"):
             return "xss"
-        if "command" in text or "exec" in text or "rce" in text or "os_system" in text:
+        if (has("command injection") or has("code injection")
+                or has("remote code execution") or has("os system")
+                or has("subprocess") or has("system call") or has("shell injection")):
             return "command_injection"
-        if "traversal" in text or "path" in text or "lfi" in text:
+        if has("path traversal") or has("directory traversal") or has("lfi"):
             return "path_traversal"
-        if "ssrf" in text:
+        if has("ssrf") or has("server side request forgery"):
             return "ssrf"
-        if "xxe" in text:
+        if has("xxe") or has("xml external entity"):
             return "xxe"
-        if "secret" in text or "password" in text or "credential" in text or "hardcoded" in text:
+        if (has("hardcoded") or has("hard coded") or has("secret")
+                or has("password") or has("credential") or has("api key")
+                or has("private key")):
             return "hardcoded_secret"
-        if "deserial" in text or "pickle" in text:
+        if has("deserialization") or has("deserialize") or has("pickle") or has("unserialize"):
             return "deserialization"
-        if "crypto" in text or "weak" in text:
+        if has("crypto") or has("weak hash") or has("md5") or has("sha1"):
             return "weak_crypto"
         return "other"
 
@@ -562,8 +591,13 @@ class AnalysisAgent(BaseAgent):
         # 仅保留实际可用的工具（self.tools 里存在的）
         available = [t for t in selected if t in self.tools]
 
-        if not available:
-            available = [t for t in self.DEFAULT_SAST_TOOLS if t in self.tools]
+        # 🔥 fix: 原逻辑 "if not available" 回退，但 gitleaks 总被加入导致
+        # 未知语言时 available=[gitleaks] 非空，跳过了 semgrep 回退。
+        # 改为：若结果不含 semgrep（核心扫描工具），补上默认工具。
+        if "semgrep_scan" not in available:
+            for t in self.DEFAULT_SAST_TOOLS:
+                if t in self.tools and t not in available:
+                    available.append(t)
 
         logger.info(f"[{self.name}] Recon 驱动选 SAST 工具: languages={langs_lower} → {available}")
         return available
