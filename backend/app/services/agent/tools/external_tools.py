@@ -321,8 +321,8 @@ class BanditInput(BaseModel):
         default=".",
         description="要扫描的路径。使用 '.' 扫描整个项目（推荐），不要使用项目目录名！"
     )
-    severity: str = Field(default="medium", description="最低严重程度: low, medium, high")
-    confidence: str = Field(default="medium", description="最低置信度: low, medium, high")
+    severity: str = Field(default="all", description="最低严重程度: all, low, medium, high")
+    confidence: str = Field(default="all", description="最低置信度: all, low, medium, high")
     max_results: int = Field(default=50, description="最大返回结果数")
 
 
@@ -392,13 +392,14 @@ Bandit 是 Python 专用的安全分析工具。
             return ToolResult(success=False, data=error_msg, error=error_msg)
 
         # 构建命令
-        severity_map = {"low": "l", "medium": "m", "high": "h"}
-        confidence_map = {"low": "l", "medium": "m", "high": "h"}
+        # 🔥 bandit 的 -l/-i 是开关不是带值参数，用 --severity-level/--confidence-level
+        severity_map = {"low": "low", "medium": "medium", "high": "high", "all": "all"}
+        confidence_map = {"low": "low", "medium": "medium", "high": "high", "all": "all"}
 
         cmd = [
             "bandit", "-r", "-f", "json",
-            "-l", severity_map.get(severity, "m"),
-            "-i", confidence_map.get(confidence, "m"),
+            "--severity-level", severity_map.get(severity, "all"),
+            "--confidence-level", confidence_map.get(confidence, "all"),
             safe_target_path
         ]
         
