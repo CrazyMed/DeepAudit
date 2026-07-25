@@ -989,6 +989,9 @@ Action Input: {{"参数": "值"}}
                                 # 🔥 FIX: Preserve non-zero line numbers
                                 if existing_f.get("line_start") and not normalized_new.get("line_start"):
                                     merged["line_start"] = existing_f["line_start"]
+                                # 🔥 FIX: Preserve file_path（SAST 有精确路径，LLM 重述常丢失）
+                                if existing_f.get("file_path") and not normalized_new.get("file_path"):
+                                    merged["file_path"] = existing_f["file_path"]
                                 # 🔥 FIX: Preserve vulnerability_type
                                 if existing_f.get("vulnerability_type") and not normalized_new.get("vulnerability_type"):
                                     merged["vulnerability_type"] = existing_f["vulnerability_type"]
