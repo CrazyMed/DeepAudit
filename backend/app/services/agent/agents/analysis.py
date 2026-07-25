@@ -514,48 +514,19 @@ class AnalysisAgent(BaseAgent):
     def _infer_vuln_type(self, check_id: str, finding: Dict) -> str:
         """根据规则 ID / 内容推断标准漏洞类型。
 
-        把连字符/下划线归一化为空格后做单词边界匹配，
-        避免短关键词误匹配（如 "rce" 匹配 "source"），
-        同时支持 check_id 形式（sql-injection）和自然语言（SQL injection）。
+        统一走 classify_vulnerability_type，消除两套分类逻辑。
+        收集所有可能含漏洞信息的字段（不同工具字段名不同），拼成字符串分类。
         """
-        import re
-        # 收集所有可能含漏洞信息的字段（不同工具字段名不同）
-        text_parts = [check_id]
+        from app.services.vuln_classifier import classify_vulnerability_type
+        # 收集所有可能含漏洞信息的字段
+        text_parts = [check_id] if check_id else []
         for key in ("title", "description", "issue_text", "test_name",
-                    "message", "RuleID", "Description"):
+                    "test_id", "message", "RuleID", "Description"):
             val = finding.get(key)
             if val:
                 text_parts.append(str(val))
-        raw = " ".join(text_parts).lower()
-        # 归一化：连字符/下划线 → 空格，便于单词边界匹配
-        text = re.sub(r'[-_]', ' ', raw)
-
-        def has(word):
-            return re.search(r'\b' + re.escape(word) + r'\b', text) is not None
-
-        if has("sql") or has("sqli"):
-            return "sql_injection"
-        if has("xss") or has("cross site"):
-            return "xss"
-        if (has("command injection") or has("code injection")
-                or has("remote code execution") or has("os system")
-                or has("subprocess") or has("system call") or has("shell injection")):
-            return "command_injection"
-        if has("path traversal") or has("directory traversal") or has("lfi"):
-            return "path_traversal"
-        if has("ssrf") or has("server side request forgery"):
-            return "ssrf"
-        if has("xxe") or has("xml external entity"):
-            return "xxe"
-        if (has("hardcoded") or has("hard coded") or has("secret")
-                or has("password") or has("credential") or has("api key")
-                or has("private key")):
-            return "hardcoded_secret"
-        if has("deserialization") or has("deserialize") or has("pickle") or has("unserialize"):
-            return "deserialization"
-        if has("crypto") or has("weak hash") or has("md5") or has("sha1"):
-            return "weak_crypto"
-        return "other"
+        combined = " ".join(text_parts) if text_parts else ""
+        return classify_vulnerability_type(combined)
 
     # SAST 工具与其适用语言的映射（Recon 驱动选工具）
     SAST_TOOL_BY_LANGUAGE = {

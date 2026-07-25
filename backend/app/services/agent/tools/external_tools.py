@@ -394,11 +394,11 @@ Bandit 是 Python 专用的安全分析工具。
         # 构建命令
         severity_map = {"low": "l", "medium": "m", "high": "h"}
         confidence_map = {"low": "l", "medium": "m", "high": "h"}
-        
+
         cmd = [
             "bandit", "-r", "-f", "json",
-            "-ll" if severity == "low" else f"-l{severity_map.get(severity, 'm')}",
-            f"-i{confidence_map.get(confidence, 'm')}",
+            "-l", severity_map.get(severity, "m"),
+            "-i", confidence_map.get(confidence, "m"),
             safe_target_path
         ]
         
