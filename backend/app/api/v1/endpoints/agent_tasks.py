@@ -1260,18 +1260,33 @@ async def _save_findings(
 
             # 🔥 修复：file_path 为空时，尝试从 title/description 里提取路径模式。
             # 实测发现 LLM 常把文件路径写进 title 而非 file_path 字段（如
-            # title="server/internal/.../sql_exec.go" 而 file_path 为空）。
+            # title="Command Injection in app.py" 而 file_path 为空）。
             if not file_path:
+                # 常见代码文件扩展名，匹配到这些就认为是文件名（不要求含 / ）
+                CODE_EXTENSIONS = {
+                    '.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.go', '.php',
+                    '.rb', '.c', '.cpp', '.h', '.rs', '.kt', '.swift', '.vue',
+                    '.sh', '.sql', '.xml', '.yaml', '.yml', '.html',
+                }
                 for text_field in ("title", "description"):
                     text_val = finding.get(text_field) or ""
-                    # 匹配常见代码路径模式：含目录分隔符的文件路径
+                    # 匹配含路径分隔符的文件路径
                     match = re.search(r'([\w\-./\\]+\.\w{1,5})', str(text_val))
                     if match:
-                        candidate = match.group(1)
-                        # 排除明显非路径的（如 .env 这种太短、或带空格）
+                        candidate = match.group(1).strip('.')
+                        candidate_lower = candidate.lower()
+                        # 含路径分隔符，或扩展名是已知代码文件
                         if "/" in candidate or "\\" in candidate:
                             file_path = candidate
                             logger.info(f"[SaveFindings] 从 {text_field} 提取到路径: {file_path}")
+                            break
+                        # 检查是否是已知代码文件扩展名（如 app.py, server.js）
+                        for ext in CODE_EXTENSIONS:
+                            if candidate_lower.endswith(ext):
+                                file_path = candidate
+                                logger.info(f"[SaveFindings] 从 {text_field} 提取到文件名: {file_path}")
+                                break
+                        if file_path:
                             break
 
             # 🔥 修复 v3.0：路径验证降级 —— 不再直接丢弃，改为标记低置信度。

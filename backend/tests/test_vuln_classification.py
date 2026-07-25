@@ -134,3 +134,30 @@ class TestClassifyEdgeCases:
 
     def test_idor(self):
         assert classify_vulnerability_type("idor") == VulnerabilityType.IDOR
+
+
+class TestClassifyChineseKeywords:
+    """中文关键词匹配（LLM 可能输出中文标题）。"""
+
+    def test_chinese_command_injection(self):
+        assert classify_vulnerability_type("命令注入 - subprocess shell=True拼接用户输入") == VulnerabilityType.COMMAND_INJECTION
+
+    def test_chinese_hardcoded_secret(self):
+        assert classify_vulnerability_type("硬编码密钥 - API密钥") == VulnerabilityType.HARDCODED_SECRET
+
+    def test_chinese_hardcoded_password(self):
+        assert classify_vulnerability_type("硬编码数据库密码") == VulnerabilityType.HARDCODED_SECRET
+
+    def test_chinese_sql_injection(self):
+        assert classify_vulnerability_type("SQL注入漏洞") == VulnerabilityType.SQL_INJECTION
+
+    def test_chinese_path_traversal(self):
+        assert classify_vulnerability_type("路径遍历漏洞") == VulnerabilityType.PATH_TRAVERSAL
+
+    def test_chinese_deserialization(self):
+        assert classify_vulnerability_type("不安全的反序列化") == VulnerabilityType.DESERIALIZATION
+
+    def test_chinese_eval_injection(self):
+        """eval 注入应归类为 code/command injection（含'注入'但不是SQL）"""
+        result = classify_vulnerability_type("eval代码注入")
+        assert result in (VulnerabilityType.CODE_INJECTION, VulnerabilityType.COMMAND_INJECTION)
