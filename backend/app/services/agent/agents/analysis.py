@@ -633,17 +633,26 @@ class AnalysisAgent(BaseAgent):
         return available
 
     async def _run_mandatory_sast_scan(self, tech_stack: Dict[str, Any], target_files: List[str]) -> str:
-        """Phase 2 核心：强制前置 SAST 全量扫描。
+        """Phase 2 核心：确保 SAST 全量扫描结果可用。
 
-        在 ReAct 循环开始前，代码层面直接调用选定的 SAST 工具，
-        不依赖 LLM 决策。结果累积到 self._tool_findings（经 base.py 收集器），
-        同时返回结构化摘要供注入 LLM 作为"必检清单"。
+        优先复用 Recon 已收集的 _tool_findings（避免重复扫描）。
+        仅当 Recon 没跑过 SAST 或结果为空时，才在 Analysis 里强制补扫。
 
         Returns:
             sast_briefing: 给 LLM 的 SAST 结果简报文本（含每条告警的文件/行/类型）
         """
         import time as _time
-        await self.emit_thinking("🔍 Phase 2: 强制 SAST 全量前置扫描启动（零漏报下限保证）...")
+
+        # 🔥 修复：优先复用 Recon 已收集的 SAST findings，避免重复扫描。
+        # Recon Agent 通常已经调过 semgrep/bandit/gitleaks，结果在 _tool_findings 里。
+        existing = getattr(self, "_tool_findings", None) or []
+        if existing:
+            logger.info(f"[{self.name}] Recon 已收集 {len(existing)} 条 SAST findings，复用（不重复扫描）")
+            await self.emit_event("info", f"✅ 复用 Recon 阶段的 {len(existing)} 条 SAST 扫描结果")
+            return self._build_sast_briefing()
+
+        # Recon 没跑过 SAST，Analysis 里强制补扫
+        await self.emit_thinking("🔍 Recon 未执行 SAST，Analysis 强制补扫...")
 
         sast_tools = self._select_sast_tools(tech_stack)
         if not sast_tools:
@@ -739,6 +748,38 @@ class AnalysisAgent(BaseAgent):
         if len(normalized) > len(show_list):
             lines.append(f"\n... 另有 {len(normalized) - len(show_list)} 条未展示（已收集，会直接进报告）")
 
+        return "\n".join(lines)
+
+    def _build_sast_briefing(self) -> str:
+        """从 _tool_findings 构建 SAST 必检清单简报（复用 Recon 已收集的结果）。"""
+        normalized = self._normalize_tool_findings()
+        if not normalized:
+            return (
+                "SAST 全量扫描完成，未发现明确安全问题。\n"
+                "请使用 read_file / RAG 工具复核高风险区域，并以 LLM 自主发现补充（标注为低置信）。"
+            )
+        sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+        normalized_sorted = sorted(
+            normalized, key=lambda x: sev_order.get(x.get("severity", "low"), 3)
+        )
+        show_list = normalized_sorted[:30]
+        lines = [
+            f"## 🔴 SAST 扫描结果（必检清单，共 {len(normalized)} 条，展示前 {len(show_list)} 条）",
+            "以下每一条都带有精确的文件路径和行号，由 Recon 阶段的 Semgrep/Bandit/Gitleaks 检出。",
+            "你的首要任务是**研判**这些告警（确认真实漏洞 / 排除误报），而非重新发现漏洞。",
+            "",
+        ]
+        for i, f in enumerate(show_list, 1):
+            lines.append(
+                f"{i}. [{f.get('severity','?').upper()}] {f.get('vulnerability_type','other')} "
+                f"| {f.get('file_path','?')}:{f.get('line_start',0)} "
+                f"| 来源:{f.get('_source_tool','?')}"
+            )
+            desc = f.get("description", "")
+            if desc:
+                lines.append(f"   描述: {desc[:120]}")
+        if len(normalized) > len(show_list):
+            lines.append(f"\n... 另有 {len(normalized) - len(show_list)} 条未展示（已收集，会直接进报告）")
         return "\n".join(lines)
 
     def _collect_tool_result(self, tool_name: str, result) -> None:
