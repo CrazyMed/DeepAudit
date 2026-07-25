@@ -858,7 +858,25 @@ class VerificationAgent(BaseAgent):
                 verdicts_debug = [(f.get("file_path", "?"), f.get("verdict"), f.get("confidence")) for f in final_result["findings"]]
                 logger.info(f"[{self.name}] LLM returned verdicts: {verdicts_debug}")
 
+                # 🔥 修复：建立原始 findings 的索引（按 title/line 匹配），
+                # LLM 重述时常丢失 file_path/code_snippet 等字段，需要从原始补回。
+                original_by_key = {}
+                for orig in findings_to_verify:
+                    key = (orig.get("line_start") or orig.get("line", 0),
+                           orig.get("title", "")[:30])
+                    original_by_key[key] = orig
+
                 for f in final_result["findings"]:
+                    # 🔥 FIX: 从原始 findings 补回 LLM 丢失的字段（file_path 等）
+                    llm_line = f.get("line_start") or f.get("line", 0)
+                    llm_title = (f.get("title", "") or "")[:30]
+                    orig_match = original_by_key.get((llm_line, llm_title))
+                    if orig_match:
+                        # 用原始数据补全 LLM 丢失的字段
+                        for k, v in orig_match.items():
+                            if not f.get(k) and v:
+                                f[k] = v
+
                     # 🔥 FIX: Normalize verdict - handle missing/empty verdict
                     verdict = f.get("verdict")
                     if not verdict or verdict not in ["confirmed", "likely", "uncertain", "false_positive"]:
