@@ -38,7 +38,9 @@ dependencies = [
     "httpx>=0.25.0",
 
     # ============ LLM Integration ============
-    "litellm>=1.90.0",
+    # 🔥 litellm<1.92：1.92+ 引入 litellm-rust(maturin)，Windows 无 Rust 工具链时构建失败。
+    #    Linux Docker 不受影响（有预编译 wheel）。本地约束 <1.92。
+    "litellm>=1.90.0,<1.92.0",
     "tiktoken>=0.5.2",
 
     # ============ Report Generation ============
