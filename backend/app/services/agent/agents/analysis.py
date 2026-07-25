@@ -633,26 +633,20 @@ class AnalysisAgent(BaseAgent):
         return available
 
     async def _run_mandatory_sast_scan(self, tech_stack: Dict[str, Any], target_files: List[str]) -> str:
-        """Phase 2 核心：确保 SAST 全量扫描结果可用。
+        """Phase 2 核心：强制 SAST 全量扫描。
 
-        优先复用 Recon 已收集的 _tool_findings（避免重复扫描）。
-        仅当 Recon 没跑过 SAST 或结果为空时，才在 Analysis 里强制补扫。
+        在 ReAct 循环开始前，代码层面直接调用选定的 SAST 工具。
+        结果累积到 self._tool_findings，同时返回结构化摘要供注入 LLM。
+
+        注意：Recon Agent 也会调 SAST，但 Recon 和 Analysis 是不同实例，
+        _tool_findings 不共享，所以 Analysis 必须自己扫。
+        要消除重复需重构 Agent 间数据传递机制（后续优化）。
 
         Returns:
             sast_briefing: 给 LLM 的 SAST 结果简报文本（含每条告警的文件/行/类型）
         """
         import time as _time
-
-        # 🔥 修复：优先复用 Recon 已收集的 SAST findings，避免重复扫描。
-        # Recon Agent 通常已经调过 semgrep/bandit/gitleaks，结果在 _tool_findings 里。
-        existing = getattr(self, "_tool_findings", None) or []
-        if existing:
-            logger.info(f"[{self.name}] Recon 已收集 {len(existing)} 条 SAST findings，复用（不重复扫描）")
-            await self.emit_event("info", f"✅ 复用 Recon 阶段的 {len(existing)} 条 SAST 扫描结果")
-            return self._build_sast_briefing()
-
-        # Recon 没跑过 SAST，Analysis 里强制补扫
-        await self.emit_thinking("🔍 Recon 未执行 SAST，Analysis 强制补扫...")
+        await self.emit_thinking("🔍 Phase 2: 强制 SAST 全量前置扫描启动（零漏报下限保证）...")
 
         sast_tools = self._select_sast_tools(tech_stack)
         if not sast_tools:
