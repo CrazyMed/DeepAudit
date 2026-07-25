@@ -275,22 +275,22 @@ class SandboxManager:
             import os as _os
             sandbox_volumes = {}
             if host_workdir.startswith("/tmp/deepaudit"):
-                # backend 的 /tmp/deepaudit 是命名 volume deepaudit_workdir
-                # sandbox 挂载同名 volume，子路径用 host_workdir 的相对部分
+                # backend 的 /tmp/deepaudit 是命名 volume（docker-compose 自动加项目名前缀）
+                # volume 全名是 deepaudit_deepaudit_workdir
+                WORKDIR_VOLUME = "deepaudit_deepaudit_workdir"
                 subpath = host_workdir.replace("/tmp/deepaudit/", "").strip("/")
                 if subpath:
                     sandbox_volumes = {
-                        "deepaudit_workdir": {
+                        WORKDIR_VOLUME: {
                             "bind": "/workspace",
                             "mode": "ro",
                         },
                     }
                     # sandbox 的 /workspace 是整个 volume，代码在 /workspace/{subpath}
-                    # 需要把 working_dir 指向子路径
                     actual_workdir = f"/workspace/{subpath}"
                 else:
                     sandbox_volumes = {
-                        "deepaudit_workdir": {"bind": "/workspace", "mode": "ro"},
+                        WORKDIR_VOLUME: {"bind": "/workspace", "mode": "ro"},
                     }
                     actual_workdir = "/workspace"
             else:
