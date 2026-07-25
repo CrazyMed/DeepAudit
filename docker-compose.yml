@@ -44,6 +44,9 @@ services:
       # - ./backend/app:/app/app:ro  # 挂载代码目录，修改后自动生效
       - backend_uploads:/app/uploads
       - /var/run/docker.sock:/var/run/docker.sock # 沙箱执行必须
+      # 🔥 Phase 2: 共享项目代码目录，让 sandbox 兄弟容器能访问 backend 解压的代码
+      # backend 解压到 /tmp/deepaudit/{task_id}，sandbox 通过同名 volume 挂载到 /workspace
+      - deepaudit_workdir:/tmp/deepaudit
     ports:
       - "8000:8000"
     env_file:
@@ -137,3 +140,4 @@ volumes:
   postgres_data:
   backend_uploads:
   redis_data:
+  deepaudit_workdir: # 🔥 Phase 2: backend 与 sandbox 共享项目代码

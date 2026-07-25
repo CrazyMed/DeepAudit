@@ -268,6 +268,37 @@ class SandboxManager:
             unset_proxy_prefix = "unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy 2>/dev/null; "
             wrapped_command = unset_proxy_prefix + command
 
+            # 🔥 Phase 2 修复：Docker-in-Docker 路径映射。
+            # backend 容器通过命名 volume deepaudit_workdir 挂载到 /tmp/deepaudit，
+            # sandbox 是兄弟容器，看不到 backend 的容器路径。
+            # 当 host_workdir 在 /tmp/deepaudit 下时，用 volume 子路径挂载。
+            import os as _os
+            sandbox_volumes = {}
+            if host_workdir.startswith("/tmp/deepaudit"):
+                # backend 的 /tmp/deepaudit 是命名 volume deepaudit_workdir
+                # sandbox 挂载同名 volume，子路径用 host_workdir 的相对部分
+                subpath = host_workdir.replace("/tmp/deepaudit/", "").strip("/")
+                if subpath:
+                    sandbox_volumes = {
+                        "deepaudit_workdir": {
+                            "bind": "/workspace",
+                            "mode": "ro",
+                        },
+                    }
+                    # sandbox 的 /workspace 是整个 volume，代码在 /workspace/{subpath}
+                    # 需要把 working_dir 指向子路径
+                    actual_workdir = f"/workspace/{subpath}"
+                else:
+                    sandbox_volumes = {
+                        "deepaudit_workdir": {"bind": "/workspace", "mode": "ro"},
+                    }
+                    actual_workdir = "/workspace"
+            else:
+                sandbox_volumes = {
+                    host_workdir: {"bind": "/workspace", "mode": "ro"},
+                }
+                actual_workdir = "/workspace"
+
             # 准备容器配置
             container_config = {
                 "image": self.config.image,
@@ -279,14 +310,12 @@ class SandboxManager:
                 "network_mode": network_mode,
                 "user": self.config.user,
                 "read_only": self.config.read_only,
-                "volumes": {
-                    host_workdir: {"bind": "/workspace", "mode": "ro"}, # 只读挂载项目代码
-                },
+                "volumes": sandbox_volumes,
                 "tmpfs": {
                     "/home/sandbox": "rw,size=100m,mode=1777",
                     "/tmp": "rw,size=100m,mode=1777"  # 添加 /tmp 目录供工具写入临时文件
                 },
-                "working_dir": "/workspace",
+                "working_dir": actual_workdir,
                 "environment": container_env,
             }
 
