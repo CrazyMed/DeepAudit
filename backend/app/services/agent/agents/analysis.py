@@ -543,6 +543,58 @@ class AnalysisAgent(BaseAgent):
     # 默认工具（语言未知或 Recon 失败时）：至少跑 semgrep + gitleaks
     DEFAULT_SAST_TOOLS = ["semgrep_scan", "gitleaks_scan"]
 
+    def _infer_languages_from_files(self) -> List[str]:
+        """当 Recon 未识别语言时，从项目文件扩展名推断。
+
+        扫描 project_root 下的文件，统计扩展名，映射到语言。
+        """
+        import os
+        ext_to_lang = {
+            ".py": "python", ".js": "javascript", ".jsx": "javascript",
+            ".ts": "typescript", ".tsx": "typescript",
+            ".java": "java", ".go": "go", ".php": "php",
+            ".rb": "ruby", ".c": "c", ".cpp": "cpp", ".h": "c",
+        }
+        # 找 project_root（从 tools 里拿，或用实例属性）
+        project_root = getattr(self, "_project_root", None)
+        if not project_root:
+            # 从 tool 实例拿
+            for tool in self.tools.values():
+                pr = getattr(tool, "project_root", None)
+                if pr:
+                    project_root = pr
+                    break
+        if not project_root or not os.path.isdir(project_root):
+            return []
+
+        ext_counts = {}
+        for root, dirs, files in os.walk(project_root):
+            # 跳过常见无关目录
+            dirs[:] = [d for d in dirs if d not in (
+                ".git", "__pycache__", "node_modules", ".venv", "venv", "dist"
+            )]
+            for f in files:
+                _, ext = os.path.splitext(f)
+                ext_lower = ext.lower()
+                if ext_lower in ext_to_lang:
+                    ext_counts[ext_lower] = ext_counts.get(ext_lower, 0) + 1
+            if sum(ext_counts.values()) > 100:
+                break  # 够多了，停止扫描
+
+        if not ext_counts:
+            return []
+
+        # 按文件数排序，取最多的语言
+        sorted_exts = sorted(ext_counts.items(), key=lambda x: x[1], reverse=True)
+        langs = []
+        seen = set()
+        for ext, _ in sorted_exts:
+            lang = ext_to_lang[ext]
+            if lang not in seen:
+                langs.append(lang)
+                seen.add(lang)
+        return langs
+
     def _select_sast_tools(self, tech_stack: Dict[str, Any]) -> List[str]:
         """根据 Recon 识别的技术栈，选择适用的 SAST 工具（Recon 驱动选规则）。"""
         languages = tech_stack.get("languages", []) if isinstance(tech_stack, dict) else []
@@ -550,6 +602,13 @@ class AnalysisAgent(BaseAgent):
             languages = [languages]
         # 统一小写
         langs_lower = [str(l).lower().strip() for l in languages if l]
+
+        # 🔥 fallback: 若 Recon 未识别出语言，从项目文件扩展名推断
+        if not langs_lower:
+            inferred = self._infer_languages_from_files()
+            if inferred:
+                langs_lower = inferred
+                logger.info(f"[{self.name}] Recon 未识别语言，从文件扩展名推断: {langs_lower}")
 
         selected = set()
         for lang in langs_lower:
