@@ -2464,8 +2464,9 @@ async def _get_project_root(
                 check_cancelled()  # 🔥 解压前再次检查
                 with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                     # 🔥 逐个文件解压，支持取消检查
-                    # 🔥 Security Fix: 使用 safe_extract_zip 替代 extract，防止 Zip Slip 和软链接攻击
-                    safe_extract_zip(zip_ref, base_path, task_id)
+                    # 🔥 使用 zip_extractor 模块（修复了无公共目录前缀时文件被跳过的 bug）
+                    from app.services.zip_extractor import safe_extract_zip as _safe_extract
+                    _safe_extract(zip_ref, base_path)
                 logger.info(f"✅ Extracted ZIP project {project.id} to {base_path}")
                 await emit(f"✅ ZIP 文件解压完成")
             except Exception as e:
