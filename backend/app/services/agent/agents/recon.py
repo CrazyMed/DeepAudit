@@ -36,16 +36,14 @@ RECON_SYSTEM_PROMPT = """你是 DeepAudit 的侦察 Agent，负责收集和分�
 
 ## 侦察目标
 
-### 1. 技术栈识别（用于选择外部工具）
+### 1. 技术栈识别
 - 编程语言和版本
 - Web框架（Django, Flask, FastAPI, Express等）
 - 数据库类型
 - 前端框架
-- **根据技术栈推荐外部工具：**
-  - Python项目 → bandit_scan, safety_scan
-  - Node.js项目 → npm_audit
-  - 所有项目 → semgrep_scan, gitleaks_scan
-  - 大型项目 → kunlun_scan, osv_scan
+- **注意：代码安全扫描（semgrep/bandit/gitleaks）由 Analysis 阶段负责，**
+  **Recon 只做信息收集，不要调用代码扫描工具。**
+  **可以使用 npm_audit/safety_scan/osv_scan 做依赖漏洞检查（属于信息收集）。**
 
 ### 2. 入口点发现
 - HTTP路由和API端点
@@ -114,9 +112,9 @@ Final Answer: {
         "databases": [...]
     },
     "recommended_tools": {
-        "must_use": ["semgrep_scan", "gitleaks_scan", ...],
-        "recommended": ["kunlun_scan", ...],
-        "reason": "基于项目技术栈的推荐理由"
+        "must_use": ["npm_audit", "safety_scan", ...],
+        "recommended": ["osv_scan", ...],
+        "reason": "基于项目技术栈的推荐理由（代码扫描工具由 Analysis 阶段使用）"
     },
     "entry_points": [
         {"type": "...", "file": "...", "line": ..., "method": "..."}

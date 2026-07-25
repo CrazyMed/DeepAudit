@@ -932,15 +932,13 @@ async def _initialize_tools(
     }
     
     # Recon 工具
+    # 🔥 Phase 2 重构：移除 SAST 工具，避免与 Analysis 重复扫描。
+    # Recon 只做信息收集（结构/技术栈/入口点），SAST 由 Analysis 独占。
     recon_tools = {
         **base_tools,
-        # 🔥 外部侦察工具 (Recon 阶段也需要使用这些工具来收集初步信息)
-        "semgrep_scan": SemgrepTool(project_root, sandbox_manager),
-        "bandit_scan": BanditTool(project_root, sandbox_manager),
-        "gitleaks_scan": GitleaksTool(project_root, sandbox_manager),
+        # 依赖扫描可以保留（信息收集性质，不是代码扫描）
         "npm_audit": NpmAuditTool(project_root, sandbox_manager),
         "safety_scan": SafetyTool(project_root, sandbox_manager),
-        "trufflehog_scan": TruffleHogTool(project_root, sandbox_manager),
         "osv_scan": OSVScannerTool(project_root, sandbox_manager),
     }
 
