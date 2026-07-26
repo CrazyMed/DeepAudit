@@ -526,7 +526,7 @@ async def _execute_agent_task(task_id: str):
                 # 🔥 Debug: Log each finding for verification
                 for i, f in enumerate(findings[:5]):  # Log first 5
                     if isinstance(f, dict):
-                        logger.info(f"[AgentTask] Finding {i+1}: file_path={f.get('file_path', '(空)')} line={f.get('line_start', '?')} title={f.get('title', 'N/A')[:40]}")
+
 
                 # 🔥 v2.1: 传递 project_root 用于文件路径验证
                 saved_count = await _save_findings(db, task_id, findings, project_root=project_root)
@@ -1432,7 +1432,7 @@ async def _save_findings(
                 references=[{"cwe": cwe_id}] if cwe_id else None,
             )
             # 🔥 DEBUG: 确认写入 DB 前的 file_path
-            logger.info(f"[SaveFindings] DB写入前: file_path={file_path!r} title={title[:30]!r} db_obj.file_path={db_finding.file_path!r}")
+
             db.add(db_finding)
             saved_count += 1
 
