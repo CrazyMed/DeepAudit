@@ -1250,10 +1250,14 @@ async def _save_findings(
             type_enum = classify_vulnerability_type(raw_type)
 
             # 🔥 Handle file path (support multiple field names)
+            # 🔥 修复：原代码三元表达式优先级 bug，当 location 不含 : 时
+            # 整个表达式走 else 返回 location（通常 None），覆盖了前面的 file_path/file。
+            # 加括号明确优先级。
             file_path = (
                 finding.get("file_path") or
                 finding.get("file") or
-                finding.get("location", "").split(":")[0] if ":" in finding.get("location", "") else finding.get("location")
+                (finding.get("location", "").split(":")[0] if ":" in str(finding.get("location", "")) else finding.get("location"))
+                or ""
             )
 
             # 🔥 修复：file_path 为空时，尝试从 title/description 里提取路径模式。
