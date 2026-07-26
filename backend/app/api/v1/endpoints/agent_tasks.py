@@ -1427,9 +1427,10 @@ async def _save_findings(
                 # References for CWE
                 references=[{"cwe": cwe_id}] if cwe_id else None,
             )
+            # 🔥 DEBUG: 确认写入 DB 前的 file_path
+            logger.info(f"[SaveFindings] DB写入前: file_path={file_path!r} title={title[:30]!r} db_obj.file_path={db_finding.file_path!r}")
             db.add(db_finding)
             saved_count += 1
-            logger.debug(f"[SaveFindings] Prepared finding: {title[:50]}... ({severity_enum})")
 
         except Exception as e:
             logger.warning(f"Failed to save finding: {e}, data: {finding}")
